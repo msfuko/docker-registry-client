@@ -59,6 +59,13 @@ func NewInsecure(registryUrl, username, password string) (*Registry, error) {
 }
 
 /*
+ * Create a new Registry, as with New, that uses the provided http.RoundTripper as transport.
+ */
+func NewWithTransport(registryUrl, username, password string, transport http.RoundTripper) (*Registry, error) {
+	return newFromTransport(registryUrl, username, password, transport, Log)
+}
+
+/*
  * Given an existing http.RoundTripper such as http.DefaultTransport, build the
  * transport stack necessary to authenticate to the Docker registry API. This
  * adds in support for OAuth bearer tokens and HTTP Basic auth, and sets up
