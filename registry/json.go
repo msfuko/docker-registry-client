@@ -4,15 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 )
 
 var (
 	ErrNoMorePages = errors.New("No more pages")
 )
 
-func (registry *Registry) getJson(url string, response interface{}) error {
-	resp, err := registry.Client.Get(url)
+func (registry *Registry) getJson(u string, response interface{}) error {
+	resp, err := registry.Client.Get(u)
 	if err != nil {
 		return err
 	}
@@ -30,8 +32,8 @@ func (registry *Registry) getJson(url string, response interface{}) error {
 // getPaginatedJson accepts a string and a pointer, and returns the
 // next page URL while updating pointed-to variable with a parsed JSON
 // value. When there are no more pages it returns `ErrNoMorePages`.
-func (registry *Registry) getPaginatedJson(url string, response interface{}) (string, error) {
-	resp, err := registry.Client.Get(url)
+func (registry *Registry) getPaginatedJson(u string, response interface{}) (string, error) {
+	resp, err := registry.Client.Get(u)
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +44,7 @@ func (registry *Registry) getPaginatedJson(url string, response interface{}) (st
 	if err != nil {
 		return "", err
 	}
-	return getNextLink(resp)
+	return getNextLink(u, resp)
 }
 
 // Matches an RFC 5988 (https://tools.ietf.org/html/rfc5988#section-5)
@@ -53,13 +55,18 @@ func (registry *Registry) getPaginatedJson(url string, response interface{}) (st
 // The URL is _supposed_ to be wrapped by angle brackets `< ... >`,
 // but e.g., quay.io does not include them. Similarly, params like
 // `rel="next"` may not have quoted values in the wild.
-var nextLinkRE = regexp.MustCompile(`^ *<?([^;>]+)>? *(?:;[^;]*)*; *rel="?next"?(?:;.*)?`)
+var nextLinkRE = regexp.MustCompile(` *<?([^;>]+)>? *(?:;[^;]*)*; *rel="?next"?`)
 
-func getNextLink(resp *http.Response) (string, error) {
+func getNextLink(base string, resp *http.Response) (string, error) {
 	for _, link := range resp.Header[http.CanonicalHeaderKey("Link")] {
-		parts := nextLinkRE.FindStringSubmatch(link)
-		if parts != nil {
-			return parts[1], nil
+		for _, l := range strings.Split(link, ",") {
+			parts := nextLinkRE.FindStringSubmatch(l)
+			if parts != nil {
+				baseURL, _ := url.Parse(base)
+				linkURL, _ := url.Parse(parts[1])
+
+				return baseURL.ResolveReference(linkURL).String(), nil
+			}
 		}
 	}
 	return "", ErrNoMorePages
