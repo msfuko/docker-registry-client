@@ -2,6 +2,9 @@ package registry
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/url"
 )
 
 type repositoriesResponse struct {
@@ -9,22 +12,19 @@ type repositoriesResponse struct {
 }
 
 func (registry *Registry) Repositories() ([]string, error) {
-	url := registry.url("/v2/_catalog")
 	repos := make([]string, 0, 10)
-	var err error //We create this here, otherwise url will be rescoped with :=
-	var response repositoriesResponse
+
+	rchan, echan := registry.StreamRepositories(context.Background())
+
 	for {
-		registry.Logf("registry.repositories url=%s", url)
-		url, err = registry.getPaginatedJson(url, &response)
-		switch err {
-		case ErrNoMorePages:
-			repos = append(repos, response.Repositories...)
-			return repos, nil
-		case nil:
-			repos = append(repos, response.Repositories...)
-			continue
-		default:
-			return nil, err
+		select {
+		case r, ok := <-rchan:
+			if !ok {
+				return repos, nil
+			}
+			repos = append(repos, r)
+		case e := <-echan:
+			return repos, e
 		}
 	}
 }
@@ -37,7 +37,7 @@ func (registry *Registry) StreamRepositories(ctx context.Context) (<-chan string
 		// defer close(errChan)
 		defer close(regChan)
 
-		url := registry.url("/v2/_catalog")
+		regurl := registry.url("/v2/_catalog")
 
 		var err error //We create this here, otherwise url will be rescoped with :=
 		var response repositoriesResponse
@@ -47,20 +47,66 @@ func (registry *Registry) StreamRepositories(ctx context.Context) (<-chan string
 			case <-ctx.Done():
 				return
 			default:
-				registry.Logf("registry.repositories url=%s", url)
-				url, err = registry.getPaginatedJson(url, &response)
+				registry.Logf("registry.repositories url=%s", regurl)
+				regurl, err = registry.getPaginatedJson(regurl, &response)
 				switch err {
 				case ErrNoMorePages:
-					if !registry.streamPage(ctx, regChan, response.Repositories) {
-						return
-					}
+					streamRegistryAPIRepositoriesPage(ctx, regChan, response.Repositories)
 					return
 				case nil:
-					if !registry.streamPage(ctx, regChan, response.Repositories) {
+					if !streamRegistryAPIRepositoriesPage(ctx, regChan, response.Repositories) {
 						return
 					}
 					continue
 				default:
+					if ue, ok := err.(*url.Error); ok {
+						if he, ok := ue.Err.(*HttpStatusError); ok {
+							if he.Response.StatusCode == http.StatusUnauthorized {
+								regurl = registry.url("/api/v0/repositories/")
+								registry.Logf("attempting DTR fallback at %v", regurl)
+
+								gotSome := false
+								for {
+									var err2 error
+
+									select {
+									case <-ctx.Done():
+										return
+									default:
+										dtrRepositories := struct {
+											Repositories []dtrRepository `json:"repositories"`
+										}{}
+
+										regurl, err2 = registry.getPaginatedJson(regurl, &dtrRepositories)
+
+										switch err2 {
+										case ErrNoMorePages:
+											gotSome = true
+											streamDTRAPIRepositoriesPage(ctx, regChan, dtrRepositories.Repositories)
+											return
+										case nil:
+											gotSome = true
+											if !streamDTRAPIRepositoriesPage(ctx, regChan, dtrRepositories.Repositories) {
+												return
+											}
+											continue
+										default:
+											if gotSome {
+												// we got something successfully but now we're failing, return the current error
+												errChan <- err2
+												return
+											}
+
+											// the DTR API didn't work, return the original error
+											errChan <- err
+											return
+										}
+									}
+								}
+							}
+						}
+					}
+
 					errChan <- err
 					return
 				}
@@ -71,12 +117,30 @@ func (registry *Registry) StreamRepositories(ctx context.Context) (<-chan string
 	return regChan, errChan
 }
 
-func (registry *Registry) streamPage(ctx context.Context, c chan string, v []string) bool {
+type dtrRepository struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Status    string `json:"status"`
+}
+
+func streamRegistryAPIRepositoriesPage(ctx context.Context, c chan string, v []string) bool {
 	for _, r := range v {
 		select {
 		case <-ctx.Done():
 			return false
 		case c <- r:
+			// next
+		}
+	}
+	return true
+}
+
+func streamDTRAPIRepositoriesPage(ctx context.Context, c chan string, v []dtrRepository) bool {
+	for _, r := range v {
+		select {
+		case <-ctx.Done():
+			return false
+		case c <- fmt.Sprintf("%s/%s", r.Namespace, r.Name):
 			// next
 		}
 	}
