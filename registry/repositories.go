@@ -97,9 +97,44 @@ func (registry *Registry) StreamRepositories(ctx context.Context) (<-chan string
 												return
 											}
 
-											// the DTR API didn't work, return the original error
-											errChan <- err
-											return
+											// try Harbor fallback
+											regurl = registry.url("/api/projects")
+											registry.Logf("attempting Harbor fallback at %v", regurl)
+											gotSome := false
+											for {
+												var err3 error
+												select {
+												case <-ctx.Done():
+													return
+												default:
+													harborProjects := []harborProject{}
+
+													regurl, err3 = registry.getPaginatedJson(regurl, &harborProjects)
+
+													switch err3 {
+													case ErrNoMorePages:
+														gotSome = true
+														streamHarborProjectsPage(ctx, registry, regChan, errChan, harborProjects)
+														return
+													case nil:
+														gotSome = true
+														if !streamHarborProjectsPage(ctx, registry, regChan, errChan, harborProjects) {
+															return
+														}
+														continue
+													default:
+														if gotSome {
+															// we got something successfully but now we're failing, return the current error
+															errChan <- err3
+															return
+														}
+
+														// the fallbacks didn't work, return the original error
+														errChan <- err
+														return
+													}
+												}
+											}
 										}
 									}
 								}
@@ -123,6 +158,17 @@ type dtrRepository struct {
 	Status    string `json:"status"`
 }
 
+type harborProject struct {
+	ID        int `json:"project_id"`
+	RepoCount int `json:"repo_count"`
+	// there are more fields but we don't care about them
+}
+
+type harborRepo struct {
+	Name string `json:"name"`
+	// there are more fields but we don't care about them
+}
+
 func streamRegistryAPIRepositoriesPage(ctx context.Context, c chan string, v []string) bool {
 	for _, r := range v {
 		select {
@@ -141,6 +187,64 @@ func streamDTRAPIRepositoriesPage(ctx context.Context, c chan string, v []dtrRep
 		case <-ctx.Done():
 			return false
 		case c <- fmt.Sprintf("%s/%s", r.Namespace, r.Name):
+			// next
+		}
+	}
+	return true
+}
+
+func streamHarborProjectsPage(ctx context.Context, registry *Registry, c chan string, e chan error, v []harborProject) bool {
+	for _, project := range v {
+		if project.RepoCount <= 0 {
+			continue
+		}
+
+		if !streamHarborProjectRepos(ctx, project, registry, c, e) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func streamHarborProjectRepos(ctx context.Context, project harborProject, registry *Registry, c chan string, e chan error) bool {
+	u := registry.url(fmt.Sprintf("/api/repositories?project_id=%d", project.ID))
+
+	for {
+		var err error
+
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+			harborRepos := []harborRepo{}
+
+			u, err = registry.getPaginatedJson(u, &harborRepos)
+
+			switch err {
+			case ErrNoMorePages:
+				streamHarborReposPage(ctx, c, harborRepos)
+				return true
+			case nil:
+				if !streamHarborReposPage(ctx, c, harborRepos) {
+					return false
+				}
+				continue
+			default:
+				// we got something successfully but now we're failing, return the current error
+				e <- err
+				return false
+			}
+		}
+	}
+}
+
+func streamHarborReposPage(ctx context.Context, c chan string, v []harborRepo) bool {
+	for _, r := range v {
+		select {
+		case <-ctx.Done():
+			return false
+		case c <- r.Name:
 			// next
 		}
 	}
