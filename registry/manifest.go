@@ -123,6 +123,26 @@ func (registry *Registry) DeleteManifest(repository string, digest digest.Digest
 	return nil
 }
 
+func (registry *Registry) DeleteV2Manifest(repository string, digest digest.Digest) error {
+	url := registry.url("/v2/%s/manifests/%s", repository, digest)
+	registry.Logf("registry.manifest.delete url=%s repository=%s reference=%s", url, repository, digest)
+
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Accept", schema2.MediaTypeManifest)
+	resp, err := registry.Client.Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (registry *Registry) PutManifest(repository, reference string, manifest distribution.Manifest) error {
 	url := registry.url("/v2/%s/manifests/%s", repository, reference)
 	registry.Logf("registry.manifest.put url=%s repository=%s reference=%s", url, repository, reference)
