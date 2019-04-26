@@ -13,11 +13,18 @@ type BasicTransport struct {
 }
 
 func (t *BasicTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.HasPrefix(req.URL.String(), t.URL) {
-		if t.Username != "" || t.Password != "" {
-			req.SetBasicAuth(t.Username, t.Password)
+	resp, err := t.Transport.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized && strings.HasPrefix(req.URL.String(), t.URL) {
+		if strings.HasPrefix(resp.Header.Get("WWW-Authenticate"), "Basic") {
+			if t.Username != "" || t.Password != "" {
+				req.SetBasicAuth(t.Username, t.Password)
+				return t.Transport.RoundTrip(req)
+			}
 		}
 	}
-	resp, err := t.Transport.RoundTrip(req)
 	return resp, err
 }
