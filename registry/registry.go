@@ -41,7 +41,7 @@ type Registry struct {
 func New(registryUrl, username, password string) (*Registry, error) {
 	transport := http.DefaultTransport
 
-	return newFromTransport(registryUrl, username, password, transport, Log)
+	return newFromTransport(registryUrl, username, password, transport, false, Log)
 }
 
 /*
@@ -55,14 +55,22 @@ func NewInsecure(registryUrl, username, password string) (*Registry, error) {
 		},
 	}
 
-	return newFromTransport(registryUrl, username, password, transport, Log)
+	return newFromTransport(registryUrl, username, password, transport, false, Log)
 }
 
 /*
  * Create a new Registry, as with New, that uses the provided http.RoundTripper as transport.
  */
 func NewWithTransport(registryUrl, username, password string, transport http.RoundTripper) (*Registry, error) {
-	return newFromTransport(registryUrl, username, password, transport, Log)
+	return newFromTransport(registryUrl, username, password, transport, false, Log)
+}
+
+/*
+ * Create a new Registry, as with New, that uses the provided http.RoundTripper as transport.
+ * The input transport is a transport stack for the Docker registry API authentication.
+ */
+func NewWithWrappedTransport(registryUrl string, transport http.RoundTripper) (*Registry, error) {
+	return newFromTransport(registryUrl, "", "", transport, true, Log)
 }
 
 /*
@@ -72,26 +80,49 @@ func NewWithTransport(registryUrl, username, password string, transport http.Rou
  * error handling this library relies on.
  */
 func WrapTransport(transport http.RoundTripper, url, username, password string) http.RoundTripper {
-	tokenTransport := &TokenTransport{
-		Transport: transport,
-		Username:  username,
-		Password:  password,
-	}
-	basicAuthTransport := &BasicTransport{
-		Transport: tokenTransport,
-		URL:       url,
-		Username:  username,
-		Password:  password,
-	}
-	errorTransport := &ErrorTransport{
-		Transport: basicAuthTransport,
-	}
-	return errorTransport
+	return wrapTransport(transport, url, username, password, true, true)
 }
 
-func newFromTransport(registryUrl, username, password string, transport http.RoundTripper, logf LogfCallback) (*Registry, error) {
+/*
+ * Given an existing http.RoundTripper such as http.DefaultTransport, build the
+ * transport stack necessary to authenticate to the Docker registry API. This
+ * adds in support for OAuth bearer tokens and with HTTP Basic auth disabled, and sets up
+ * error handling this library relies on.
+ */
+func WrapTokenOnlyTransport(transport http.RoundTripper, url, username, password string) http.RoundTripper {
+	return wrapTransport(transport, url, username, password, true, false)
+}
+
+func wrapTransport(transport http.RoundTripper, url, username, password string, withTokenAuth, withBasicAuth bool) http.RoundTripper {
+	if withTokenAuth {
+		transport = &TokenTransport{
+			Transport: transport,
+			Username:  username,
+			Password:  password,
+		}
+	}
+
+	if withBasicAuth {
+		transport = &BasicTransport{
+			Transport: transport,
+			URL:       url,
+			Username:  username,
+			Password:  password,
+		}
+	}
+
+	transport = &ErrorTransport{
+		Transport: transport,
+	}
+
+	return transport
+}
+
+func newFromTransport(registryUrl, username, password string, transport http.RoundTripper, isWrappedTransport bool, logf LogfCallback) (*Registry, error) {
 	url := strings.TrimSuffix(registryUrl, "/")
-	transport = WrapTransport(transport, url, username, password)
+	if !isWrappedTransport {
+		transport = WrapTransport(transport, url, username, password)
+	}
 	registry := &Registry{
 		URL: url,
 		Client: &http.Client{
